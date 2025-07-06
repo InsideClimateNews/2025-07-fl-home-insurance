@@ -1,0 +1,253 @@
+---
+title: "Florida’s Home Insurance Crisis Hits Hardest in Some of the State’s Poorest Counties"
+output: html_document
+---
+
+Data and [R](https://www.r-project.org/) code to reproduce the analysis underlying [this Jul. 6, 2025 Inside Climate News article](https://insideclimatenews.org/news/06072025/florida-poor-inland-counties-home-insurance-crisis/), examining problems in the Florida home insurance market in the face of climate change.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE)
+```
+
+### Setting up
+
+```{r message=FALSE}
+# load required packages
+library(tidyverse)
+library(tidycensus)
+library(readxl)
+library(janitor)
+```
+
+### Data on home insurance non-renewals
+
+In December 2024, the U.S. Senate Committee on the Budget [released data](https://www.budget.senate.gov/chairman/newsroom/press/new-data-reveal-climate-change-driven-insurance-crisis-is-spreading) from a survey and report concluding that severe weather events influenced by climate change have driven rising insurance non-renewals across the nation.
+
+```{r}
+# load and process data
+file_path <- "data/senate.xlsx"
+sheet_names <- excel_sheets(file_path)
+non_renewal <- map_dfr(sheet_names, ~ {
+  read_excel(file_path, sheet = .x) %>%
+    mutate(sheet_name = .x) %>%
+    bind_rows() %>%
+    clean_names()
+})
+
+non_renewal <- non_renewal %>%
+  mutate(year = as.integer(word(sheet_name)),
+         state = case_when(nchar(county) == 2 ~ county)) %>%
+  fill(state, .direction = "down") %>%
+  select(-sheet_name) %>%
+  rename(calculated_policies_in_force = calculated_policies_in_force_b_c)  %>%
+  filter(!grepl("/", county)) 
+
+counties_few_policies <- non_renewal %>%
+  filter(year == 2022 & calculated_policies_in_force < 250) %>%
+  select(state,county) %>%
+  mutate(flag = "<250 policies in 2022")
+
+fl_non_renewal <- non_renewal %>%
+  filter(nchar(county) > 2 & county != "Grand Total" & state == "FL") %>%
+  select(state,county,year,non_renewal_pc = calculated_non_renewal_rate) %>%
+  mutate(non_renewal_pc = non_renewal_pc * 100) 
+
+fl_non_renewal_wide <- fl_non_renewal %>%
+  pivot_wider(names_from = year, values_from = non_renewal_pc, names_prefix = "nonrenewal_") %>%
+  clean_names() %>%
+  mutate(pc_change_non_renewal = (nonrenewal_2023 - nonrenewal_2018)/nonrenewal_2018 *100) %>%
+  left_join(counties_few_policies)
+```
+
+### Data on median household income
+
+To provide socioeconomic context, we added data on county-level median household income from the U.S. Census Bureau's 2019-2023 5-year [American Community Survey](https://www.census.gov/programs-surveys/acs.html).
+
+```{r}
+income <- get_acs(geography = "county", 
+                  state = "FL",
+                  variables = c(median_income = "B19013_001"),
+                  output = "wide",
+                  year = 2023)  %>%
+  clean_names() %>%
+  separate(name, into = c("county", "state"), sep = ", ") %>%
+  mutate(county = gsub(" County", "", county),
+         county = str_to_upper(county),
+         state = state.abb[match(state, state.name)]) %>%
+  arrange(state,county)
+```
+
+### Data on risks from natural disasters
+
+To consider risks from natural hazards and measures of social vulnerability and resilience, we used data from the Federal Emergency Management Agency’s [National Risk Index](https://hazards.fema.gov/nri/) (NRI).
+
+```{r}
+nri <- read_csv("data/NRI_Table_Counties/NRI_Table_Counties.csv") %>%
+  clean_names() %>%
+  select(stcofips,population,alr_valb,alr_vra_npctl)
+```
+
+### Data on home insurance premiums
+
+This data was provided by Philip Mulder of the University of Wisconsin-Madison and Benjamin Keys of the University of Pennsylvania’s Wharton School. They [have shown that](https://www.nber.org/papers/w32579), across the nation, median premiums are rising fastest in communities facing the greatest threats from natural disasters.
+
+```{r}
+fl_county_names <- income %>%
+  select(county,geoid)
+
+fl_premiums <- read_csv("data/fl_median_premiums.csv") %>%
+  select(geoid = county_str,year,annual_prem) %>%
+  mutate(geoid = as.character(geoid)) %>%
+  inner_join(fl_county_names, by = "geoid") %>%
+  mutate(county = str_replace(county, "Desoto","DeSoto")) 
+
+fl_premiums_wide <- fl_premiums %>% 
+  pivot_wider(names_from = year, values_from = annual_prem, names_prefix = "premium_") %>%
+  clean_names() %>%
+  mutate(pc_change_premium = (premium_2023 - premium_2018)/premium_2018 *100)
+```
+
+### Combine the data
+
+```{r}
+fl_combined <- left_join(income,fl_non_renewal_wide, by = c("state","county")) %>%
+  left_join(nri, by = c("geoid" = "stcofips")) %>%
+  left_join(fl_premiums_wide %>% select(-county), by = "geoid") %>%  
+  mutate(county = str_to_title(county),
+         county = str_replace(county, "Desoto","DeSoto"))
+
+write_csv(fl_combined, "processed_data/fl_combined.csv")
+```
+
+### Maps of non-renewals in 2022 and 2023
+
+Hover over any county to see the non-renewal rate from the Senate Budget Committee report and median household income. The maps show that four counties around Lake Okeechobee—Glades, Hendry, Highlands and Okeechobee—are an epicenter of the state's insurance non-renewal crisis.
+
+<iframe title="Home insurance policies not renewed in 2022" aria-label="Map" id="datawrapper-chart-h4uNn" src="https://datawrapper.dwcdn.net/h4uNn/4/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="705" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+<br>
+
+<iframe title="Home insurance policies not renewed in 2023" aria-label="Map" id="datawrapper-chart-CB8nW" src="https://datawrapper.dwcdn.net/CB8nW/1/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="703" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+### Timelines for non-renewals and median annual premiums by county
+
+```{r}
+fl_nonrenewal_timeline <- fl_non_renewal %>%
+  select(-state) %>%
+  mutate(county = str_to_title(county)) %>%
+  pivot_wider(names_from = county, values_from = non_renewal_pc)
+
+write_csv(fl_nonrenewal_timeline, "processed_data/fl_nonrenewal_timeline.csv")
+
+fl_premiums_timeline <- fl_premiums %>%
+  select(-geoid) %>%
+  mutate(county = str_to_title(county)) %>%
+  pivot_wider(names_from = county, values_from = annual_prem)
+
+write_csv(fl_premiums_timeline, "processed_data/fl_premiums_timeline.csv")
+```
+
+In these charts the four counties around Lake Okeechobee are highlighted in red. The crisis of non-renewal has hit Glades, Okeechobee, Hendry and Highland counties especially hard, peaking in 2022. While premiums have risen in these four counties, they lag behind those in wealthy coastal counties including Monroe, Broward and Miami-Dade.
+
+<iframe title="Home insurance non-renewal rates by county and year" aria-label="Interactive line chart" id="datawrapper-chart-DUQ8v" src="https://datawrapper.dwcdn.net/DUQ8v/6/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="434" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+<br>
+
+<iframe title="Median annual premiums by county and year" aria-label="Interactive line chart" id="datawrapper-chart-d7RwA" src="https://datawrapper.dwcdn.net/d7RwA/2/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="427" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+<br>
+
+### Relationships between 2022 non-renewal and measures of risk and socioeconomic vulnerability
+
+The expected annual loss rate for buildings is a measure from the NRI that provides a way to compare the risk to buildings from all natural hazards, irrespective of the value of the properties involved. A value of 0.005, for instance, means that for every ten dollars of building value across a county, you would expect losses of five cents in a given year. Viewed in this way, the risk to buildings for the counties around Lake Okeechobee is not especially high compared to other Florida counties.
+
+<iframe title="2022 home insurance non-renewal vs. expected annual loss rate for buildings" aria-label="Scatter Plot" id="datawrapper-chart-7QDVX" src="https://datawrapper.dwcdn.net/7QDVX/10/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="456" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+<br>
+
+The social vulnerability and community resilience adjusted expected annual loss rate is a measure from the NRI that extends the assessment of expected annual losses to buildings, crops and people to take account of socioeconomic factors that affect vulnerability and resilience in the face of natural hazards. It is expressed here as a national percentile, meaning that a county with a score of more than 95 is in the riskiest 5 percent of counties across the nation.
+
+<iframe title="2022 home insurance non-renewal vs. adjusted expected annual loss rate " aria-label="Scatter Plot" id="datawrapper-chart-rQkqO" src="https://datawrapper.dwcdn.net/rQkqO/9/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="516" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+<br>
+
+Household income is an important determinant of social vulnerability and community resilience. The counties around Lake Okeechobee are among the poorest in Florida.
+
+In the face of rising climate-related hazards, the crisis of home insurance non-renewal has hit hardest in low-income counties in Florida with low community resilience and high social vulnerability.
+
+<iframe title="2022 home insurance non-renewal vs. median household income" aria-label="Scatter Plot" id="datawrapper-chart-TYkdx" src="https://datawrapper.dwcdn.net/TYkdx/12/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="512" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+<br>
+
+### How has the number of policies held by Citizens changed over time?
+
+```{r}
+citizens <- read_csv("data/citizens_policies_counties.csv") %>%
+  mutate(county = str_replace(county, "Saint","St.")) %>%
+  pivot_wider(names_from = "county", values_from = "policies") %>%
+  filter(date >= "2018-01-01")
+
+write_csv(citizens, "processed_data/citizens.csv", na = "")
+```
+
+The Citizens Property Insurance Corp. is Florida's state-backed insurer of last resort. This chart shows how, across the state, the number of policies held by Citizens grew dramatically over the period covered by the Senate Budget Committee report, especially in wealthy coastal counties including Broward and Miami-Dade. This started before the crisis of non-renewal documented in this committee's report, probably reflecting rising premiums from other insurance companies and a loss of coverage from smaller companies facing financial difficultes. Citizens is now reducing the number of policies it holds by offering financial incentives for companies to take them over in a process it calls "depopulation."
+
+<iframe title="Citizens policies by county over time" aria-label="Interactive line chart" id="datawrapper-chart-7B9Yd" src="https://datawrapper.dwcdn.net/7B9Yd/8/" scrolling="no" frameborder="0" style="width: 0; min-width: 100% !important; border: none;" height="399" data-external="1">
+
+</iframe>
+
+```{=html}
+<script type="text/javascript">!function(){"use strict";window.addEventListener("message",(function(a){if(void 0!==a.data["datawrapper-height"]){var e=document.querySelectorAll("iframe");for(var t in a.data["datawrapper-height"])for(var r,i=0;r=e[i];i++)if(r.contentWindow===a.source){var d=a.data["datawrapper-height"][t]+"px";r.style.height=d}}}))}();
+</script>
+```
+
+<br>
